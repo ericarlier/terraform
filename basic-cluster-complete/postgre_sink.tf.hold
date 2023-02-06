@@ -1,0 +1,163 @@
+# --------------------------------------------------------
+# Service Accounts
+# --------------------------------------------------------
+resource "confluent_service_account" "pg_sink_connector" {
+    display_name = "pg-sink-connector-${random_id.id.hex}"
+    description = "PG Sink Connector User"
+}
+
+# ------------------------------------------------------
+# ACLS
+# ------------------------------------------------------
+resource "confluent_kafka_acl" "pg_sink_connector_acl_describe_cluster" {
+    kafka_cluster {
+        id = confluent_kafka_cluster.simple_cluster.id
+    }
+    resource_type = "CLUSTER"
+    resource_name = "kafka-cluster"
+    pattern_type = "LITERAL"
+    principal = "User:${confluent_service_account.pg_sink_connector.id}"
+    operation = "DESCRIBE"
+    permission = "ALLOW"
+    host = "*"
+    rest_endpoint = confluent_kafka_cluster.simple_cluster.rest_endpoint
+    credentials {
+        key = confluent_api_key.app_manager_keys.id
+        secret = confluent_api_key.app_manager_keys.secret
+    }
+}
+resource "confluent_kafka_acl" "pg_sink_connector_acl_read" {
+    kafka_cluster {
+        id = confluent_kafka_cluster.simple_cluster.id
+    }
+    resource_type = "TOPIC"
+    resource_name = "pageviews_"
+    pattern_type = "PREFIXED"
+    principal = "User:${confluent_service_account.pg_sink_connector.id}"
+    operation = "READ"
+    permission = "ALLOW"
+    host = "*"
+    rest_endpoint = confluent_kafka_cluster.simple_cluster.rest_endpoint
+    credentials {
+        key = confluent_api_key.app_manager_keys.id
+        secret = confluent_api_key.app_manager_keys.secret
+    }
+}
+resource "confluent_kafka_acl" "pg_sink_connector_acl_read_lcc" {
+    kafka_cluster {
+        id = confluent_kafka_cluster.simple_cluster.id
+    }
+    resource_type = "GROUP"
+    resource_name = "connect-lcc"
+    pattern_type = "PREFIXED"
+    principal = "User:${confluent_service_account.pg_sink_connector.id}"
+    operation = "READ"
+    permission = "ALLOW"
+    host = "*"
+    rest_endpoint = confluent_kafka_cluster.simple_cluster.rest_endpoint
+    credentials {
+        key = confluent_api_key.app_manager_keys.id
+        secret = confluent_api_key.app_manager_keys.secret
+    }
+}
+resource "confluent_kafka_acl" "pg_sink_connector_acl_create" {
+    kafka_cluster {
+        id = confluent_kafka_cluster.simple_cluster.id
+    }
+    resource_type = "TOPIC"
+    resource_name = "dlq-lcc"
+    pattern_type = "PREFIXED"
+    principal = "User:${confluent_service_account.pg_sink_connector.id}"
+    operation = "CREATE"
+    permission = "ALLOW"
+    host = "*"
+    rest_endpoint = confluent_kafka_cluster.simple_cluster.rest_endpoint
+    credentials {
+        key = confluent_api_key.app_manager_keys.id
+        secret = confluent_api_key.app_manager_keys.secret
+    }
+}
+resource "confluent_kafka_acl" "pg_sink_connector_acl_write" {
+    kafka_cluster {
+        id = confluent_kafka_cluster.simple_cluster.id
+    }
+    resource_type = "TOPIC"
+    resource_name = "dlq-lcc"
+    pattern_type = "PREFIXED"
+    principal = "User:${confluent_service_account.pg_sink_connector.id}"
+    operation = "WRITE"
+    permission = "ALLOW"
+    host = "*"
+    rest_endpoint = confluent_kafka_cluster.simple_cluster.rest_endpoint
+    credentials {
+        key = confluent_api_key.app_manager_keys.id
+        secret = confluent_api_key.app_manager_keys.secret
+    }
+}
+
+resource "confluent_api_key" "pg_sink_connector_keys" {
+    display_name = "pg-sink-connector-keys-api-key-${random_id.id.hex}"
+    description = "Key for Postgre Sink Connector"
+    owner {
+        id = confluent_service_account.pg_sink_connector.id 
+        api_version = confluent_service_account.pg_sink_connector.api_version
+        kind = confluent_service_account.pg_sink_connector.kind
+    }
+    managed_resource {
+        id = confluent_kafka_cluster.simple_cluster.id 
+        api_version = confluent_kafka_cluster.simple_cluster.api_version
+        kind = confluent_kafka_cluster.simple_cluster.kind
+        environment {
+            id = confluent_environment.env.id
+        }
+    }
+    depends_on = [
+        confluent_kafka_acl.pg_sink_connector_acl_read,
+        confluent_kafka_acl.pg_sink_connector_acl_read_lcc,
+        confluent_kafka_acl.pg_sink_connector_acl_create,
+        confluent_kafka_acl.pg_sink_connector_acl_write
+    ]
+
+}
+
+# ------------------------------------------------------
+# CONNECT
+# ------------------------------------------------------
+resource "confluent_connector" "postgre_sink" {
+    environment {
+        id = confluent_environment.env.id 
+    }
+    kafka_cluster {
+        id = confluent_kafka_cluster.simple_cluster.id
+    }
+    status = "RUNNING"
+    config_sensitive = {
+        "connection.user": "postgres",
+        "connection.password": "pg2Test!",
+    }
+    config_nonsensitive = {
+        "connector.class": "PostgresSink"
+        "name": "PostgresSinkConnector"
+        "input.data.format": "AVRO"
+        "input.key.format" : "STRING"
+        "kafka.auth.mode": "SERVICE_ACCOUNT"
+        "kafka.service.account.id" = "${confluent_service_account.pg_sink_connector.id}"
+        "connection.host": "${aws_eip.postgres_db_eip.public_ip}"
+        "connection.port": "5432"
+        "db.name": "postgres"
+        "topics": "pageviews_female"
+        "insert.mode": "UPSERT"
+        "db.timezone": "UTC"
+        "auto.create": "true"
+        "auto.evolve": "true"
+        "pk.mode": "record_key"
+        "pk.fields": "User_ID",
+        "tasks.max": "1"
+    }        
+    
+    depends_on = [
+        confluent_kafka_acl.connectors_source_acl_create_topic,
+        confluent_kafka_acl.connectors_source_acl_write,
+        confluent_api_key.connector_keys,
+    ]
+}
